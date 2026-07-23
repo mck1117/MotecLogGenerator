@@ -33,7 +33,34 @@ python3 motec_log_generator.py /path/to/my/data/csv_data.csv CSV
 
 This will generate a motec .ld file `/path/to/my/data/csv_data.ld`.
 
-**The first column of the CSV file must be time.** Channels will not be assigned any units.
+**The first column of the CSV file must be time.**
+
+Fields may be separated by commas, tabs, or semicolons, the delimiter is detected from the file.
+
+A row of units may optionally be placed directly below the header row, in which case those units
+will be assigned to each channel, otherwise channels will not be assigned any units.
+
+Channels do not need a value in every row. An empty field means that channel was not updated at
+that timestamp, which is how sparsely populated logs are recorded. Any channel which has no values
+at all is dropped.
+
+The CSV file may also begin with a preamble of `"key","value"` metadata rows, as exported by AiM
+data loggers. The `Racer`, `Vehicle`, `Session`, `Championship`, `Segment`, and `Comment` entries
+are used to fill in the MoTeC log metadata, `Date` and `Time` set the log date, and `Sample Rate`
+sets the resample frequency. Anything passed on the command line takes precedence.
+
+```
+"Format","AiM CSV File"
+"Session","Ridge Road"
+"Vehicle","2015 Porsche Cayman S"
+"Racer","Jane Smith"
+"Sample Rate","20"
+
+"Time","RPM","COOLANT TEMP"
+"s","rpm","°C"
+
+"0.000","719","99.0"
+```
 
 ### Accessport Logs
 
@@ -50,6 +77,12 @@ A different destination and filename for the generated .ld file can also be spec
 ```
 
 It is also possible to provide additional arguments to populate the metadata in the motec log file for driver, venue, vehicle, etc. See the usage below for full details.
+
+**MoTeC i2 will not display any channel data for a log with an empty driver, vehicle id, venue, or
+session.** The log still opens and the channel list appears, but none of the data is usable. A
+placeholder is written for any of those four which is not supplied, either on the command line or
+from the log metadata, so the generated log is always usable. The remaining fields (event name,
+vehicle type, and the comments) can be left empty without any problems.
 
 ```
 usage: motec_log_generator.py [-h] [--output OUTPUT] [--frequency FREQUENCY]

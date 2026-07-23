@@ -4,6 +4,29 @@ import struct
 from data_log import DataLog, Message, Channel
 from ldparser.ldparser import ldVehicle, ldVenue, ldEvent, ldHead, ldChan, ldData
 
+# All text in a .ld file is stored in fixed size single byte strings, so any other characters must
+# be substituted or dropped, and the text truncated, before it is written. These are the plain text
+# equivalents for symbols commonly found in log units.
+TEXT_REPLACEMENTS = {
+    "°C": "C",
+    "°F": "F",
+    "°": "deg",
+    "µ": "u",
+    "Ω": "ohm",
+}
+
+def sanitize_text(text, max_length):
+    """ Converts text to a plain ASCII string that will fit in a fixed size .ld text field.
+
+    max_length: int, size of the field in bytes, one byte is reserved for the null terminator
+    """
+    for symbol, replacement in TEXT_REPLACEMENTS.items():
+        text = text.replace(symbol, replacement)
+
+    text = text.encode("ascii", "ignore").decode("ascii")
+
+    return text[:max_length - 1]
+
 class MotecLog(object):
     """ Handles generating a MoTeC .ld file from log data.
 
@@ -21,6 +44,22 @@ class MotecLog(object):
     HEADER_PTR = 11336
 
     CHANNEL_HEADER_SIZE = struct.calcsize(ldChan.fmt)
+
+    # Sizes of the text fields in the .ld format [bytes]
+    NAME_SIZE = 64
+    COMMENT_SIZE = 1024
+    VEHICLE_TYPE_SIZE = 32
+    CHANNEL_NAME_SIZE = 32
+    CHANNEL_UNITS_SIZE = 12
+
+    # MoTeC i2 will load a log with empty driver, vehicle, venue, or session fields, and will show
+    # the channel list from it, but none of the channel data is usable. Any of these left empty are
+    # filled in with a placeholder so the log is always usable. The remaining fields (event name,
+    # vehicle type, and the comments) may be left empty without any problems.
+    DEFAULT_DRIVER = "Unknown"
+    DEFAULT_VEHICLE_ID = "Unknown"
+    DEFAULT_VENUE_NAME = "Unknown"
+    DEFAULT_EVENT_SESSION = "Session"
 
     def __init__(self):
         self.driver = ""
@@ -44,15 +83,25 @@ class MotecLog(object):
 
         This must be called before adding any channel data.
         """
-        ld_vehicle = ldVehicle(self.vehicle_id, self.vehicle_weight, self.vehicle_type, \
-            self.vehicle_comment)
-        ld_venue = ldVenue(self.venue_name, self.VEHICLE_PTR, ld_vehicle)
-        ld_event = ldEvent(self.event_name, self.event_session, self.long_comment, \
-            self.VENUE_PTR, ld_venue)
+        # Fill in placeholders for the fields i2 needs in order to show any channel data
+        driver = sanitize_text(self.driver, self.NAME_SIZE) or self.DEFAULT_DRIVER
+        vehicle_id = sanitize_text(self.vehicle_id, self.NAME_SIZE) or self.DEFAULT_VEHICLE_ID
+        vehicle_type = sanitize_text(self.vehicle_type, self.VEHICLE_TYPE_SIZE)
+        vehicle_comment = sanitize_text(self.vehicle_comment, self.VEHICLE_TYPE_SIZE)
+        venue_name = sanitize_text(self.venue_name, self.NAME_SIZE) or self.DEFAULT_VENUE_NAME
+        event_name = sanitize_text(self.event_name, self.NAME_SIZE)
+        event_session = sanitize_text(self.event_session, self.NAME_SIZE) \
+            or self.DEFAULT_EVENT_SESSION
+        long_comment = sanitize_text(self.long_comment, self.COMMENT_SIZE)
+        short_comment = sanitize_text(self.short_comment, self.NAME_SIZE)
+
+        ld_vehicle = ldVehicle(vehicle_id, self.vehicle_weight, vehicle_type, vehicle_comment)
+        ld_venue = ldVenue(venue_name, self.VEHICLE_PTR, ld_vehicle)
+        ld_event = ldEvent(event_name, event_session, long_comment, self.VENUE_PTR, ld_venue)
 
         self.ld_header = ldHead(self.HEADER_PTR, self.HEADER_PTR, self.EVENT_PTR, ld_event, \
-            self.driver, self.vehicle_id, self.venue_name, self.datetime, self.short_comment, \
-            self.event_name, self.event_session)
+            driver, vehicle_id, venue_name, self.datetime, short_comment, event_name, \
+            event_session)
 
     def add_channel(self, log_channel):
         """ Adds a single channel of data to the motec log.
@@ -91,9 +140,11 @@ class MotecLog(object):
         # decimals = log_channel.decimals
         decimals = 0
 
+        name = sanitize_text(log_channel.name, self.CHANNEL_NAME_SIZE)
+        units = sanitize_text(log_channel.units, self.CHANNEL_UNITS_SIZE)
+
         ld_channel = ldChan(None, meta_ptr, prev_meta_ptr, next_meta_ptr, data_ptr, data_len, \
-            data_type, freq, shift, multiplier, scale, decimals, log_channel.name, "", \
-            log_channel.units)
+            data_type, freq, shift, multiplier, scale, decimals, name, "", units)
 
         # Add in the channel data
         ld_channel._data = np.array([], data_type)

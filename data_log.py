@@ -1,4 +1,5 @@
 import cantools
+import csv
 import math
 
 class DataLog(object):
@@ -7,8 +8,13 @@ class DataLog(object):
         self.name = name
         self.channels = {}
 
+        # Any key/value metadata found in the log preamble (e.g. driver, vehicle, venue). Values are
+        # strings, or lists of strings for entries with more than one value.
+        self.metadata = {}
+
     def clear(self):
         self.channels = {}
+        self.metadata = {}
 
     def add_channel(self, name, units, data_type, decimals, initial_message=None):
         msg = [] if not initial_message else [initial_message]
@@ -85,8 +91,17 @@ class DataLog(object):
         """ Creates channels populated with messages from a CSV log file.
 
         This will create a channel for each column in the CSV file, with the name of that channel
-        taken from the CSV header. All channels will be created without any units. Any non numeric data
-        will be ignored, and that channel will be removed. The first column of data must be time
+        taken from the CSV header. Any non numeric data will be ignored, and that channel will be
+        removed. The first column of data must be time.
+
+        Fields may be separated by commas, tabs, or semicolons, and may be quoted. Rows which do
+        not contain a numeric timestamp are skipped. Channels do not need a value in every row, an
+        empty field simply means that channel was not updated at that timestamp.
+
+        The log may optionally be preceded by a preamble of "key","value" metadata rows (as
+        produced by AiM data loggers), which will be stored in self.metadata. A units row directly
+        below the header row is also optional, and will be used to assign units to each channel.
+        Otherwise channels are created without any units.
 
         log_lines: List, containing CSV log lines
         """
@@ -95,49 +110,107 @@ class DataLog(object):
         if not log_lines:
             return
 
-        # Get the channel names, ignore the first column as it is assumed to be time
-        header = log_lines[0]
-        channel_names = header.split(",")[1:]
+        # Read all the rows up front so we can identify which rows hold the metadata, header, units,
+        # and data. Blank rows are kept for now as they separate the sections of the file.
+        delimiter = self.__detect_delimiter(log_lines)
+        rows = [[field.strip() for field in row] for row in csv.reader(log_lines, delimiter=delimiter)]
+
+        # The data begins at the first row with a numeric value in the time column
+        data_start = None
+        for i, row in enumerate(rows):
+            if len(row) > 1 and self.__is_float(row[0]):
+                data_start = i
+                break
+
+        # Without a header row, or without any data, there is nothing we can extract
+        if not data_start:
+            return
+
+        num_columns = len(rows[data_start])
+
+        # The header is the last row above the data, ignoring any blank rows in between. If it is
+        # preceded by another row of the same width, without a blank row separating the two, then
+        # that first row is the header and the one below it holds the units.
+        header_index = data_start - 1
+        while header_index >= 0 and not any(rows[header_index]):
+            header_index -= 1
+
+        if header_index < 0:
+            return
+
+        units_index = None
+        if header_index >= 1 and len(rows[header_index]) == num_columns \
+            and len(rows[header_index - 1]) == num_columns and any(rows[header_index - 1]):
+            units_index = header_index
+            header_index -= 1
+
+        # Everything above the header is "key","value" metadata
+        for row in rows[:header_index]:
+            if len(row) >= 2 and row[0]:
+                self.metadata[row[0]] = row[1] if len(row) == 2 else row[1:]
+
+        # Get the channel names and units, ignoring the first column as it is assumed to be time
+        channel_names = rows[header_index][1:]
+        if units_index is not None:
+            channel_units = rows[units_index][1:]
+        else:
+            channel_units = []
 
         # We'll keep a map of names and column numbers for easy channel lookups when parsing rows
         i = 0
         channel_dict = {}
         for name in channel_names:
-            self.add_channel(name, "", float, 0)
+            units = channel_units[i] if i < len(channel_units) else ""
+            self.add_channel(name, units, float, 0)
 
             channel_dict[name] = i
             i += 1
 
         # Go through each line grabbing all the channel values
-        for line in log_lines[1:]:
-            line = line.strip("\n")
-            values = line.split(",")
-
-            # Timestamp is the first element
-            t = float(values[0])
+        for values in rows[data_start:]:
+            # Timestamp is the first element. Skip blank rows and any trailing non data rows
+            # (summary lines, etc)
+            try:
+                t = float(values[0])
+            except (ValueError, IndexError):
+                continue
 
             # Grab each remaining channel value. We keep a map of all the channel names and column
             # numbers we are retrieving, so we will look at that to determine which columns to read.
             # If we fail to read an entry in any column, we will delete that channel entirely.
             invalid_channels = []
             for name, i in channel_dict.items():
+                val_text = values[i + 1] if i + 1 < len(values) else ""
+
+                # Channels are not required to have a value in every row, sparsely populated logs
+                # only record a value when the channel is updated
+                if not val_text:
+                    continue
+
                 # We'll only parse numeric data
                 try:
-                    val = float(values[i + 1])
-                    message = Message(t, val)
-                    self.channels[name].messages.append(message)
-
-                    val_text_split = values[i + 1].split(".")
-                    decimals_present = 0 if len(val_text_split) == 1 else len(val_text_split[1])
-                    self.channels[name].decimals = max(decimals_present, self.channels[name].decimals)
+                    val = float(val_text)
                 except ValueError:
                     print("WARNING: Found non numeric values for channel %s, removing channel" % \
                         name)
                     invalid_channels.append(name)
+                    continue
+
+                self.channels[name].messages.append(Message(t, val))
+
+                val_text_split = val_text.split(".")
+                decimals_present = 0 if len(val_text_split) == 1 else len(val_text_split[1])
+                self.channels[name].decimals = max(decimals_present, self.channels[name].decimals)
 
             for name in invalid_channels:
                 del channel_dict[name]
                 del self.channels[name]
+
+        # Any channel which never received a value holds no data worth converting
+        empty_channels = [name for name, channel in self.channels.items() if not channel.messages]
+        for name in empty_channels:
+            print("WARNING: Found no values for channel %s, removing channel" % name)
+            del self.channels[name]
 
     def from_accessport_log(self, log_lines):
         """ Creates channels populated with messages from a COBB Accessport CSV log file.
@@ -166,6 +239,33 @@ class DataLog(object):
 
             channel.name = name
             channel.units = units
+
+    @staticmethod
+    def __detect_delimiter(log_lines, num_lines=10):
+        """ Returns the field delimiter used by a delimited text log.
+
+        The delimiter is taken to be whichever candidate appears most often in the first several
+        lines of the file, defaulting to a comma when none of them are present.
+        """
+        delimiters = [",", "\t", ";"]
+        counts = dict.fromkeys(delimiters, 0)
+
+        for line in log_lines[:num_lines]:
+            for delimiter in delimiters:
+                counts[delimiter] += line.count(delimiter)
+
+        delimiter = max(delimiters, key=lambda d: counts[d])
+
+        return delimiter if counts[delimiter] else ","
+
+    @staticmethod
+    def __is_float(text):
+        """ Returns True if the text can be parsed as a number. """
+        try:
+            float(text)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def __parse_can_log_line(line):

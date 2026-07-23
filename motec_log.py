@@ -1,7 +1,7 @@
 import datetime
 import numpy as np
 import struct
-from data_log import DataLog, Message, Channel
+from data_log import DataLog, Channel
 from ldparser.ldparser import ldVehicle, ldVenue, ldEvent, ldHead, ldChan, ldData
 
 # All text in a .ld file is stored in fixed size single byte strings, so any other characters must
@@ -128,7 +128,7 @@ class MotecLog(object):
         next_meta_ptr = meta_ptr + self.CHANNEL_HEADER_SIZE
 
         # Channel specs
-        data_len = len(log_channel.messages)
+        data_len = len(log_channel)
         data_type = np.float32 if log_channel.data_type is float else np.int32
         freq = int(log_channel.avg_frequency())
         shift = 0
@@ -146,10 +146,8 @@ class MotecLog(object):
         ld_channel = ldChan(None, meta_ptr, prev_meta_ptr, next_meta_ptr, data_ptr, data_len, \
             data_type, freq, shift, multiplier, scale, decimals, name, "", units)
 
-        # Add in the channel data
-        ld_channel._data = np.array([], data_type)
-        for msg in log_channel.messages:
-            ld_channel._data = np.append(ld_channel._data, data_type(msg.value))
+        # Add in the channel data, converted in a single pass
+        ld_channel._data = np.frombuffer(log_channel.values, dtype=np.float64).astype(data_type)
 
         # Add the ld channel and advance the file pointers
         self.ld_channels.append(ld_channel)

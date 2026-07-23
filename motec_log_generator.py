@@ -121,11 +121,8 @@ if __name__ == '__main__':
         print("ERROR: DBC file %s does not exist" % args.dbc)
         exit(1)
 
-    print("Loading log...")
-    with open(args.log, "r", errors="replace") as file:
-        lines = file.readlines()
-
-    # Create our data log from the input data
+    # Create our data log from the input data. The log file is read as it is parsed rather than up
+    # front, large logs do not fit comfortably in memory.
     data_log = DataLog()
 
     if args.log_type == "CAN":
@@ -137,14 +134,16 @@ if __name__ == '__main__':
         print("Loading DBC...")
         can_db = cantools.database.load_file(args.dbc)
 
+    print("Loading log...")
+    with open(args.log, "r", errors="replace") as log_file:
         print("Extracting data...")
-        data_log.from_can_log(lines, can_db)
-    elif args.log_type == "CSV":
-        print("Extracting data...")
-        data_log.from_csv_log(lines)
-    elif args.log_type == "ACCESSPORT":
-        print("Extracting data...")
-        data_log.from_accessport_log(lines)
+
+        if args.log_type == "CAN":
+            data_log.from_can_log(log_file, can_db)
+        elif args.log_type == "CSV":
+            data_log.from_csv_log(log_file)
+        elif args.log_type == "ACCESSPORT":
+            data_log.from_accessport_log(log_file)
 
     if not data_log.channels:
         print("ERROR: Failed to find any channels in log data")
